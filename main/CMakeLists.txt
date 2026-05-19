@@ -1,0 +1,26 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "wifi_app.c"
+        "server_app.c"
+        "system_state.c"
+        "ir_app.c"
+        "buzzer_app.c"
+        "camera_app.c"
+        "alarm_app.c"
+        "sd_app.c"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_event
+        esp_netif
+        esp_http_server
+        esp_driver_gpio
+        esp_driver_sdmmc
+        esp32-camera
+        fatfs
+        sdmmc
+        espressif__cjson
+)
