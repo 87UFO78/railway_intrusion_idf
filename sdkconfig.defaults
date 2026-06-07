@@ -14,4 +14,4 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # Keep Wi-Fi/network processing on Core 0 and camera work on Core 1.
 CONFIG_ESP_WIFI_TASK_PINNED_TO_CORE_0=y
 CONFIG_CAMERA_CORE1=y
-CONFIG_CAMERA_PSRAM_DMA=y
+# CONFIG_CAMERA_PSRAM_DMA is not set
