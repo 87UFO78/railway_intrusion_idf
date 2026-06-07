@@ -49,9 +49,9 @@ void buzzer_app_start(void)
         "buzzer_task",
         4096,
         NULL,
-        5,
+        APP_TASK_PRIORITY_BACKGROUND,
         NULL,
-        1
+        APP_CORE_NETWORK
     );
 
     DEBUG_LOGI(TAG, "Buzzer task started, pin=%d", BUZZER_PIN);
