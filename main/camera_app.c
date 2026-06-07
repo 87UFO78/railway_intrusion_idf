@@ -69,11 +69,6 @@ esp_err_t camera_app_init(void)
         .fb_location = CAMERA_FB_IN_PSRAM
     };
 
-#if CONFIG_CAMERA_PSRAM_DMA
-    // Force the proven non-PSRAM-DMA path even if an old sdkconfig is reused.
-    (void)esp_camera_set_psram_mode(false);
-#endif
-
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK)
     {
