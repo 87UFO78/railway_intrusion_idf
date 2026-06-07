@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "esp_http_server.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,9 +24,53 @@ static httpd_handle_t api_server = NULL;
 static httpd_handle_t stream_server = NULL;
 
 #define PART_BOUNDARY "frame"
+#define STREAM_BUFFER_GROW_SIZE (16 * 1024)
 static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace; boundary=" PART_BOUNDARY;
 static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
+
+static bool copy_camera_frame(uint8_t **buffer, size_t *capacity, size_t *frame_size)
+{
+    camera_fb_t *fb = camera_app_capture();
+    if (!fb)
+    {
+        return false;
+    }
+
+    if (fb->format != PIXFORMAT_JPEG)
+    {
+        DEBUG_LOGE(TAG, "Camera frame is not JPEG");
+        camera_app_return(fb);
+        return false;
+    }
+
+    if (fb->len > *capacity)
+    {
+        size_t new_capacity =
+            ((fb->len + STREAM_BUFFER_GROW_SIZE - 1) / STREAM_BUFFER_GROW_SIZE) *
+            STREAM_BUFFER_GROW_SIZE;
+        uint8_t *new_buffer = heap_caps_realloc(
+            *buffer,
+            new_capacity,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+        );
+
+        if (!new_buffer)
+        {
+            DEBUG_LOGE(TAG, "Failed to allocate stream buffer, size=%u", (unsigned)new_capacity);
+            camera_app_return(fb);
+            return false;
+        }
+
+        *buffer = new_buffer;
+        *capacity = new_capacity;
+    }
+
+    memcpy(*buffer, fb->buf, fb->len);
+    *frame_size = fb->len;
+    camera_app_return(fb);
+    return true;
+}
 
 static void url_decode(char *dst, const char *src, size_t dst_size)
 {
@@ -230,17 +275,20 @@ static esp_err_t capture_handler(httpd_req_t *req)
 {
     system_touch_pc_alive();
 
-    camera_fb_t *fb = camera_app_capture();
-    if (!fb)
+    uint8_t *frame_buffer = NULL;
+    size_t frame_capacity = 0;
+    size_t frame_size = 0;
+
+    if (!copy_camera_frame(&frame_buffer, &frame_capacity, &frame_size))
     {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Camera capture failed");
         return ESP_FAIL;
     }
 
     httpd_resp_set_type(req, "image/jpeg");
-    httpd_resp_send(req, (const char *)fb->buf, fb->len);
-    camera_app_return(fb);
-    return ESP_OK;
+    esp_err_t ret = httpd_resp_send(req, (const char *)frame_buffer, frame_size);
+    heap_caps_free(frame_buffer);
+    return ret;
 }
 
 static esp_err_t update_alarm_handler(httpd_req_t *req)
@@ -344,6 +392,9 @@ static esp_err_t stream_handler(httpd_req_t *req)
     system_touch_pc_alive();
 
     char part_buf[96];
+    uint8_t *frame_buffer = NULL;
+    size_t frame_capacity = 0;
+    size_t frame_size = 0;
     esp_err_t ret = ESP_OK;
 
     httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
@@ -352,41 +403,37 @@ static esp_err_t stream_handler(httpd_req_t *req)
     {
         system_touch_pc_alive();
 
-        camera_fb_t *fb = camera_app_capture();
-        if (!fb)
+        if (!copy_camera_frame(&frame_buffer, &frame_capacity, &frame_size))
         {
-            DEBUG_LOGE(TAG, "stream: camera_fb_get failed");
+            DEBUG_LOGE(TAG, "stream: frame copy failed");
             vTaskDelay(pdMS_TO_TICKS(30));
             continue;
         }
 
-        size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART, fb->len);
+        size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART, (unsigned)frame_size);
 
         ret = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
         if (ret != ESP_OK)
         {
-            camera_app_return(fb);
             break;
         }
 
         ret = httpd_resp_send_chunk(req, part_buf, hlen);
         if (ret != ESP_OK)
         {
-            camera_app_return(fb);
             break;
         }
 
-        ret = httpd_resp_send_chunk(req, (const char *)fb->buf, fb->len);
+        ret = httpd_resp_send_chunk(req, (const char *)frame_buffer, frame_size);
         if (ret != ESP_OK)
         {
-            camera_app_return(fb);
             break;
         }
 
-        camera_app_return(fb);
         vTaskDelay(pdMS_TO_TICKS(30));
     }
 
+    heap_caps_free(frame_buffer);
     DEBUG_LOGI(TAG, "stream: client disconnected");
     return ret;
 }
@@ -465,6 +512,7 @@ void server_app_start(void)
     stream_config.max_uri_handlers = 4;
     stream_config.stack_size = 8192;
     stream_config.lru_purge_enable = true;
+    stream_config.send_wait_timeout = 2;
 
     ret = httpd_start(&stream_server, &stream_config);
     if (ret == ESP_OK)
