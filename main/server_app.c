@@ -485,6 +485,8 @@ void server_app_start(void)
     api_config.server_port = 80;
     api_config.max_uri_handlers = 16;
     api_config.stack_size = 8192;
+    api_config.core_id = APP_CORE_NETWORK;
+    api_config.task_priority = APP_TASK_PRIORITY_CONTROL;
     api_config.lru_purge_enable = true;
 
     esp_err_t ret = httpd_start(&api_server, &api_config);
@@ -511,6 +513,8 @@ void server_app_start(void)
     stream_config.ctrl_port = 32769;
     stream_config.max_uri_handlers = 4;
     stream_config.stack_size = 8192;
+    stream_config.core_id = APP_CORE_NETWORK;
+    stream_config.task_priority = APP_TASK_PRIORITY_CAMERA;
     stream_config.lru_purge_enable = true;
     stream_config.send_wait_timeout = 2;
 
@@ -530,9 +534,9 @@ void server_app_start(void)
         "pc_watchdog_task",
         4096,
         NULL,
-        5,
+        APP_TASK_PRIORITY_CONTROL,
         NULL,
-        0
+        APP_CORE_NETWORK
     );
 
     DEBUG_LOGI(TAG, "API server started: http://192.168.4.1");

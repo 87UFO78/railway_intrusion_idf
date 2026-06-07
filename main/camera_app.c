@@ -62,7 +62,7 @@ esp_err_t camera_app_init(void)
         .frame_size = FRAMESIZE_QVGA,
         .jpeg_quality = 8,
         .fb_count = 2,
-        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+        .grab_mode = CAMERA_GRAB_LATEST,
         .fb_location = CAMERA_FB_IN_PSRAM
     };
 

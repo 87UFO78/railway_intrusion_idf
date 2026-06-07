@@ -143,9 +143,9 @@ void ir_app_start(void)
         "camera_task",
         8192,
         NULL,
-        5,
+        APP_TASK_PRIORITY_CAMERA,
         &camera_task_handle,
-        1
+        APP_CORE_CAMERA
     );
 
     xTaskCreatePinnedToCore(
@@ -153,9 +153,9 @@ void ir_app_start(void)
         "detection_task",
         4096,
         NULL,
-        5,
+        APP_TASK_PRIORITY_CONTROL,
         NULL,
-        1
+        APP_CORE_CAMERA
     );
 
     DEBUG_LOGI(TAG, "IR task started, pin=%d", IR_PIN);
