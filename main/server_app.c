@@ -145,12 +145,21 @@ static esp_err_t read_req_body(httpd_req_t *req, char *buffer, size_t buffer_siz
 
 static esp_err_t test_handler(httpd_req_t *req)
 {
-    system_touch_pc_alive();
     g_pcConnected = true;
+    system_touch_pc_alive();
     system_state_update();
 
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t disconnect_handler(httpd_req_t *req)
+{
+    system_mark_pc_offline();
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "DISCONNECTED", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -409,6 +418,7 @@ static esp_err_t update_alarm_get_handler(httpd_req_t *req)
 static esp_err_t stream_handler(httpd_req_t *req)
 {
     system_touch_pc_alive();
+    uint32_t stream_generation = system_connection_generation();
 
     if (!camera_app_is_ready())
     {
@@ -420,6 +430,7 @@ static esp_err_t stream_handler(httpd_req_t *req)
     size_t frame_capacity = 0;
     size_t frame_size = 0;
     esp_err_t ret = ESP_OK;
+    bool client_disconnected = false;
 
     if (!copy_camera_frame(&frame_buffer, &frame_capacity, &frame_size))
     {
@@ -437,18 +448,21 @@ static esp_err_t stream_handler(httpd_req_t *req)
         ret = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
         if (ret != ESP_OK)
         {
+            client_disconnected = true;
             break;
         }
 
         ret = httpd_resp_send_chunk(req, part_buf, hlen);
         if (ret != ESP_OK)
         {
+            client_disconnected = true;
             break;
         }
 
         ret = httpd_resp_send_chunk(req, (const char *)frame_buffer, frame_size);
         if (ret != ESP_OK)
         {
+            client_disconnected = true;
             break;
         }
 
@@ -463,6 +477,10 @@ static esp_err_t stream_handler(httpd_req_t *req)
     }
 
     heap_caps_free(frame_buffer);
+    if (client_disconnected && system_connection_is_active(stream_generation))
+    {
+        system_mark_pc_offline();
+    }
     DEBUG_LOGI(TAG, "stream: client disconnected");
     return ret;
 }
@@ -478,12 +496,7 @@ static void pc_watchdog_task(void *pvParameters)
             uint32_t now = system_millis();
             if (now - g_pcLastSeenMs > TIMEOUT_MS)
             {
-                g_pcOnline = false;
-                g_pcConnected = false;
-                g_timeSynced = false;
-                g_systemReady = false;
-                system_set_alarm_active(false);
-                g_allowDetect = false;
+                system_mark_pc_offline();
                 DEBUG_LOGW(TAG, "PC 斷線");
             }
         }
@@ -526,6 +539,8 @@ void server_app_start(void)
     }
 
     register_uri(api_server, "/test", HTTP_GET, test_handler);
+    register_uri(api_server, "/disconnect", HTTP_GET, disconnect_handler);
+    register_uri(api_server, "/disconnect", HTTP_POST, disconnect_handler);
     register_uri(api_server, "/set_time", HTTP_GET, set_time_handler);
     register_uri(api_server, "/status", HTTP_GET, status_handler);
     register_uri(api_server, "/last_alarm", HTTP_GET, last_alarm_handler);

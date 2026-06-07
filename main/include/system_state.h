@@ -22,6 +22,9 @@ void system_state_init(void);
 void system_state_update(void);
 void system_set_alarm_active(bool active);
 void system_touch_pc_alive(void);
+void system_mark_pc_offline(void);
+uint32_t system_connection_generation(void);
+bool system_connection_is_active(uint32_t generation);
 uint32_t system_millis(void);
 
 #endif

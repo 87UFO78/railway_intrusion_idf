@@ -16,6 +16,7 @@
 static const char *TAG = "ir_app";
 
 static TaskHandle_t camera_task_handle = NULL;
+static volatile uint32_t camera_event_generation = 0;
 
 static void camera_task(void *pvParameters)
 {
@@ -23,7 +24,8 @@ static void camera_task(void *pvParameters)
     {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-        if (!g_systemReady || !g_pcOnline)
+        uint32_t event_generation = camera_event_generation;
+        if (!system_connection_is_active(event_generation))
         {
             DEBUG_LOGW(TAG, "系統未準備好，不拍照");
             continue;
@@ -31,13 +33,21 @@ static void camera_task(void *pvParameters)
 
         camera_fb_t *fb = camera_app_capture();
         uint32_t image_id = 0;
+        bool photo_saved = false;
 
         if (fb)
         {
+            if (!system_connection_is_active(event_generation))
+            {
+                camera_app_return(fb);
+                continue;
+            }
+
             image_id = ++g_imageCounter;
 
             if (sd_app_save_jpg_by_id(image_id, fb))
             {
+                photo_saved = true;
                 DEBUG_LOGI(TAG, "異物照片儲存成功 ImageId=%lu size=%d",
                          (unsigned long)image_id,
                          fb->len);
@@ -53,6 +63,15 @@ static void camera_task(void *pvParameters)
         else
         {
             DEBUG_LOGE(TAG, "異物照片拍攝失敗，仍然建立警報紀錄");
+        }
+
+        if (!system_connection_is_active(event_generation))
+        {
+            if (photo_saved)
+            {
+                sd_app_delete_photo_by_id(image_id);
+            }
+            continue;
         }
 
         char time_str[32] = {0};
@@ -76,6 +95,7 @@ static void detection_task(void *pvParameters)
 
         if (!g_systemReady || !g_pcOnline)
         {
+            last_state = val;
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -112,8 +132,16 @@ static void detection_task(void *pvParameters)
         {
             DEBUG_LOGW(TAG, "偵測到異物");
 
-            system_set_alarm_active(true);
+            uint32_t event_generation = system_connection_generation();
+            if (!system_connection_is_active(event_generation))
+            {
+                last_state = val;
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
+            }
+
             g_allowDetect = false;
+            camera_event_generation = event_generation;
 
             if (camera_task_handle != NULL)
             {
