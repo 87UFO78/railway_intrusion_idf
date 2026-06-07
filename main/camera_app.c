@@ -28,13 +28,16 @@ static const char *TAG = "camera_app";
 #define PCLK_GPIO_NUM     13
 
 static SemaphoreHandle_t camera_mutex = NULL;
+static volatile bool camera_ready = false;
 
 esp_err_t camera_app_init(void)
 {
+    camera_ready = false;
+
     camera_mutex = xSemaphoreCreateMutex();
     if (camera_mutex == NULL)
     {
-        DEBUG_LOGE(TAG, "Camera mutex create failed");
+        ESP_LOGE(TAG, "Camera mutex create failed");
         return ESP_FAIL;
     }
 
@@ -62,14 +65,19 @@ esp_err_t camera_app_init(void)
         .frame_size = FRAMESIZE_QVGA,
         .jpeg_quality = 8,
         .fb_count = 2,
-        .grab_mode = CAMERA_GRAB_LATEST,
+        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
         .fb_location = CAMERA_FB_IN_PSRAM
     };
+
+#if CONFIG_CAMERA_PSRAM_DMA
+    // Force the proven non-PSRAM-DMA path even if an old sdkconfig is reused.
+    (void)esp_camera_set_psram_mode(false);
+#endif
 
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK)
     {
-        DEBUG_LOGE(TAG, "Camera init failed: 0x%x", err);
+        ESP_LOGE(TAG, "Camera init failed: %s (0x%x)", esp_err_to_name(err), err);
         return err;
     }
 
@@ -82,11 +90,13 @@ esp_err_t camera_app_init(void)
         s->set_saturation(s, 1);
     }
 
-    for (int i = 0; i < 3; i++)
+    bool warmup_ok = false;
+    for (int i = 0; i < 5; i++)
     {
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb)
         {
+            warmup_ok = true;
             DEBUG_LOGI(TAG, "Camera warmup frame %d OK, size=%d", i + 1, fb->len);
             esp_camera_fb_return(fb);
         }
@@ -97,15 +107,27 @@ esp_err_t camera_app_init(void)
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
+    if (!warmup_ok)
+    {
+        ESP_LOGE(TAG, "Camera initialized but no frame was received");
+        esp_camera_deinit();
+        return ESP_FAIL;
+    }
+
+    camera_ready = true;
     DEBUG_LOGI(TAG, "Camera init success");
     return ESP_OK;
 }
 
+bool camera_app_is_ready(void)
+{
+    return camera_ready;
+}
+
 camera_fb_t *camera_app_capture(void)
 {
-    if (camera_mutex == NULL)
+    if (!camera_ready || camera_mutex == NULL)
     {
-        DEBUG_LOGE(TAG, "Camera mutex not ready");
         return NULL;
     }
 
@@ -131,7 +153,7 @@ camera_fb_t *camera_app_capture(void)
     }
 
     xSemaphoreGive(camera_mutex);
-    DEBUG_LOGE(TAG, "Camera capture failed after retries");
+    ESP_LOGE(TAG, "Camera capture failed after retries");
     return NULL;
 }
 
