@@ -29,6 +29,13 @@ static const char *STREAM_CONTENT_TYPE = "multipart/x-mixed-replace; boundary=" 
 static const char *STREAM_BOUNDARY = "\r\n--" PART_BOUNDARY "\r\n";
 static const char *STREAM_PART = "Content-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n";
 
+static esp_err_t send_service_unavailable(httpd_req_t *req, const char *message)
+{
+    httpd_resp_set_status(req, "503 Service Unavailable");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_send(req, message, HTTPD_RESP_USE_STRLEN);
+}
+
 static bool copy_camera_frame(uint8_t **buffer, size_t *capacity, size_t *frame_size)
 {
     camera_fb_t *fb = camera_app_capture();
@@ -57,7 +64,12 @@ static bool copy_camera_frame(uint8_t **buffer, size_t *capacity, size_t *frame_
 
         if (!new_buffer)
         {
-            DEBUG_LOGE(TAG, "Failed to allocate stream buffer, size=%u", (unsigned)new_capacity);
+            new_buffer = heap_caps_realloc(*buffer, new_capacity, MALLOC_CAP_8BIT);
+        }
+
+        if (!new_buffer)
+        {
+            ESP_LOGE(TAG, "Failed to allocate frame buffer, size=%u", (unsigned)new_capacity);
             camera_app_return(fb);
             return false;
         }
@@ -133,12 +145,21 @@ static esp_err_t read_req_body(httpd_req_t *req, char *buffer, size_t buffer_siz
 
 static esp_err_t test_handler(httpd_req_t *req)
 {
-    system_touch_pc_alive();
     g_pcConnected = true;
+    system_touch_pc_alive();
     system_state_update();
 
     httpd_resp_set_type(req, "text/plain");
     httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t disconnect_handler(httpd_req_t *req)
+{
+    system_mark_pc_offline();
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "DISCONNECTED", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
@@ -187,12 +208,14 @@ static esp_err_t status_handler(httpd_req_t *req)
 
     char response[192];
     snprintf(response, sizeof(response),
-             "{\"pcConnected\":%s,\"timeSynced\":%s,\"systemReady\":%s,\"pcOnline\":%s,\"alarmActive\":%s}",
+             "{\"pcConnected\":%s,\"timeSynced\":%s,\"systemReady\":%s,\"pcOnline\":%s,"
+             "\"alarmActive\":%s,\"cameraReady\":%s}",
              g_pcConnected ? "true" : "false",
              g_timeSynced ? "true" : "false",
              g_systemReady ? "true" : "false",
              g_pcOnline ? "true" : "false",
-             g_alarmActive ? "true" : "false");
+             g_alarmActive ? "true" : "false",
+             camera_app_is_ready() ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
@@ -274,6 +297,11 @@ static esp_err_t photo_handler(httpd_req_t *req)
 static esp_err_t capture_handler(httpd_req_t *req)
 {
     system_touch_pc_alive();
+
+    if (!camera_app_is_ready())
+    {
+        return send_service_unavailable(req, "Camera unavailable");
+    }
 
     uint8_t *frame_buffer = NULL;
     size_t frame_capacity = 0;
@@ -390,50 +418,69 @@ static esp_err_t update_alarm_get_handler(httpd_req_t *req)
 static esp_err_t stream_handler(httpd_req_t *req)
 {
     system_touch_pc_alive();
+    uint32_t stream_generation = system_connection_generation();
+
+    if (!camera_app_is_ready())
+    {
+        return send_service_unavailable(req, "Camera unavailable");
+    }
 
     char part_buf[96];
     uint8_t *frame_buffer = NULL;
     size_t frame_capacity = 0;
     size_t frame_size = 0;
     esp_err_t ret = ESP_OK;
+    bool client_disconnected = false;
+
+    if (!copy_camera_frame(&frame_buffer, &frame_capacity, &frame_size))
+    {
+        heap_caps_free(frame_buffer);
+        return send_service_unavailable(req, "Camera capture failed");
+    }
 
     httpd_resp_set_type(req, STREAM_CONTENT_TYPE);
-
     while (true)
     {
         system_touch_pc_alive();
-
-        if (!copy_camera_frame(&frame_buffer, &frame_capacity, &frame_size))
-        {
-            DEBUG_LOGE(TAG, "stream: frame copy failed");
-            vTaskDelay(pdMS_TO_TICKS(30));
-            continue;
-        }
 
         size_t hlen = snprintf(part_buf, sizeof(part_buf), STREAM_PART, (unsigned)frame_size);
 
         ret = httpd_resp_send_chunk(req, STREAM_BOUNDARY, strlen(STREAM_BOUNDARY));
         if (ret != ESP_OK)
         {
+            client_disconnected = true;
             break;
         }
 
         ret = httpd_resp_send_chunk(req, part_buf, hlen);
         if (ret != ESP_OK)
         {
+            client_disconnected = true;
             break;
         }
 
         ret = httpd_resp_send_chunk(req, (const char *)frame_buffer, frame_size);
         if (ret != ESP_OK)
         {
+            client_disconnected = true;
             break;
         }
 
         vTaskDelay(pdMS_TO_TICKS(30));
+
+        if (!copy_camera_frame(&frame_buffer, &frame_capacity, &frame_size))
+        {
+            ESP_LOGE(TAG, "Stream stopped: camera capture failed");
+            ret = ESP_FAIL;
+            break;
+        }
     }
 
     heap_caps_free(frame_buffer);
+    if (client_disconnected && system_connection_is_active(stream_generation))
+    {
+        system_mark_pc_offline();
+    }
     DEBUG_LOGI(TAG, "stream: client disconnected");
     return ret;
 }
@@ -449,12 +496,7 @@ static void pc_watchdog_task(void *pvParameters)
             uint32_t now = system_millis();
             if (now - g_pcLastSeenMs > TIMEOUT_MS)
             {
-                g_pcOnline = false;
-                g_pcConnected = false;
-                g_timeSynced = false;
-                g_systemReady = false;
-                system_set_alarm_active(false);
-                g_allowDetect = false;
+                system_mark_pc_offline();
                 DEBUG_LOGW(TAG, "PC 斷線");
             }
         }
@@ -485,6 +527,8 @@ void server_app_start(void)
     api_config.server_port = 80;
     api_config.max_uri_handlers = 16;
     api_config.stack_size = 8192;
+    api_config.core_id = APP_CORE_NETWORK;
+    api_config.task_priority = APP_TASK_PRIORITY_CONTROL;
     api_config.lru_purge_enable = true;
 
     esp_err_t ret = httpd_start(&api_server, &api_config);
@@ -495,6 +539,8 @@ void server_app_start(void)
     }
 
     register_uri(api_server, "/test", HTTP_GET, test_handler);
+    register_uri(api_server, "/disconnect", HTTP_GET, disconnect_handler);
+    register_uri(api_server, "/disconnect", HTTP_POST, disconnect_handler);
     register_uri(api_server, "/set_time", HTTP_GET, set_time_handler);
     register_uri(api_server, "/status", HTTP_GET, status_handler);
     register_uri(api_server, "/last_alarm", HTTP_GET, last_alarm_handler);
@@ -511,6 +557,8 @@ void server_app_start(void)
     stream_config.ctrl_port = 32769;
     stream_config.max_uri_handlers = 4;
     stream_config.stack_size = 8192;
+    stream_config.core_id = APP_CORE_NETWORK;
+    stream_config.task_priority = APP_TASK_PRIORITY_CAMERA;
     stream_config.lru_purge_enable = true;
     stream_config.send_wait_timeout = 2;
 
@@ -530,9 +578,9 @@ void server_app_start(void)
         "pc_watchdog_task",
         4096,
         NULL,
-        5,
+        APP_TASK_PRIORITY_CONTROL,
         NULL,
-        0
+        APP_CORE_NETWORK
     );
 
     DEBUG_LOGI(TAG, "API server started: http://192.168.4.1");

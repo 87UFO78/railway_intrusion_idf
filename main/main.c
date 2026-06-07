@@ -35,7 +35,11 @@ void app_main(void)
 
     wifi_app_start();
 
-    camera_app_init();
+    esp_err_t camera_ret = camera_app_init();
+    if (camera_ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Camera unavailable: %s", esp_err_to_name(camera_ret));
+    }
 
     sd_app_init();
 
